@@ -1,0 +1,9 @@
+[project]
+name = "claude-usage-monitor"
+version = "0.1.0"
+description = "Live terminal dashboard for Claude Code token usage"
+requires-python = ">=3.11"
+dependencies = ["rich>=13.0"]
+
+[project.scripts]
+claude-monitor = "monitor:main"
