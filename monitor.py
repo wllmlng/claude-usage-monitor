@@ -16,6 +16,7 @@ from rich.progress_bar import ProgressBar
 from rich.table import Table
 from rich.text import Text
 from rich.align import Align
+from rich.columns import Columns
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
@@ -42,12 +43,42 @@ MODEL_PRICING = {
     "haiku": {"input": 1.0, "output": 5.0, "cache_read": 0.10, "cache_create": 1.25},
 }
 
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(values, width=24):
+    """Render a sparkline string from a list of numbers."""
+    if not values or max(values) == 0:
+        return "▁" * width
+    mx = max(values)
+    # Pad or truncate to width
+    if len(values) < width:
+        values = [0] * (width - len(values)) + values
+    elif len(values) > width:
+        values = values[-width:]
+    return "".join(SPARK_CHARS[min(int(v / mx * 7), 7)] if mx > 0 else "▁" for v in values)
+
+
+def horizontal_bar(parts, width=40):
+    """Render a colored horizontal stacked bar from [(value, color, label), ...]."""
+    total = sum(v for v, _, _ in parts)
+    if total == 0:
+        return Text("▒" * width, style="dim")
+    bar = Text()
+    for value, color, label in parts:
+        segment_width = max(int(value / total * width), 1) if value > 0 else 0
+        bar.append("█" * segment_width, style=color)
+    # Fill remaining
+    current = sum(max(int(v / total * width), 1) if v > 0 else 0 for v, _, _ in parts)
+    if current < width:
+        bar.append("░" * (width - current), style="dim")
+    return bar
+
 
 def estimate_cost(sessions):
     """Estimate what the usage would cost on API pricing."""
     total_cost = 0.0
     for s in sessions:
-        # Determine pricing tier from model names
         models = s.get("models", [])
         model_str = " ".join(models).lower()
         if "opus" in model_str:
@@ -76,10 +107,7 @@ _session_cache: dict[str, tuple[float, int, dict]] = {}
 
 
 def scan_live_sessions():
-    """Scan JSONL conversation logs with caching.
-
-    Only re-parses files whose mtime or size changed since last check.
-    """
+    """Scan JSONL conversation logs with caching."""
     global _session_cache
     sessions = []
     if not PROJECTS_DIR.exists():
@@ -101,19 +129,16 @@ def scan_live_sessions():
             except OSError:
                 continue
 
-            # Check cache — skip re-parse if file hasn't changed
             cached = _session_cache.get(path_key)
             if cached and cached[0] == mtime and cached[1] == size:
                 sessions.append(cached[2])
                 continue
 
-            # File changed or new — parse it
             session = parse_jsonl_session(jsonl_path, project_dir.name)
             if session:
                 _session_cache[path_key] = (mtime, size, session)
                 sessions.append(session)
 
-    # Clean up deleted files from cache
     for key in list(_session_cache.keys()):
         if key not in seen_paths:
             del _session_cache[key]
@@ -134,6 +159,10 @@ def parse_jsonl_session(path, project_dir_name):
     first_ts = None
     last_ts = None
     session_id = path.stem
+    hourly_tokens = {}  # hour (int, local tz) -> total tokens
+    last_user_prompt = None
+    last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+    tracking_last_prompt = False
 
     try:
         with open(path) as f:
@@ -162,6 +191,9 @@ def parse_jsonl_session(path, project_dir_name):
                     content = msg.get("content")
                     if isinstance(content, str):
                         user_messages += 1
+                        last_user_prompt = content
+                        last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+                        tracking_last_prompt = True
 
                 if role == "assistant":
                     assistant_messages += 1
@@ -169,10 +201,26 @@ def parse_jsonl_session(path, project_dir_name):
                     if model:
                         models_used.add(model)
 
-                    input_tokens += usage.get("input_tokens", 0)
-                    output_tokens += usage.get("output_tokens", 0)
-                    cache_read += usage.get("cache_read_input_tokens", 0)
-                    cache_create += usage.get("cache_creation_input_tokens", 0)
+                    msg_input = usage.get("input_tokens", 0)
+                    msg_output = usage.get("output_tokens", 0)
+                    msg_cache_r = usage.get("cache_read_input_tokens", 0)
+                    msg_cache_c = usage.get("cache_creation_input_tokens", 0)
+
+                    input_tokens += msg_input
+                    output_tokens += msg_output
+                    cache_read += msg_cache_r
+                    cache_create += msg_cache_c
+
+                    if tracking_last_prompt:
+                        last_prompt_response_tokens["input"] += msg_input
+                        last_prompt_response_tokens["output"] += msg_output
+                        last_prompt_response_tokens["cache_read"] += msg_cache_r
+                        last_prompt_response_tokens["cache_create"] += msg_cache_c
+
+                    # Track hourly usage
+                    if ts_str:
+                        hour = datetime.fromisoformat(ts_str).astimezone(LOCAL_TZ).hour
+                        hourly_tokens[hour] = hourly_tokens.get(hour, 0) + msg_input + msg_output + msg_cache_r + msg_cache_c
 
                     for block in msg.get("content", []):
                         if isinstance(block, dict) and block.get("type") == "tool_use":
@@ -184,7 +232,16 @@ def parse_jsonl_session(path, project_dir_name):
     if first_ts is None:
         return None
 
-    project_name = project_dir_name.split("-")[-1] if "-" in project_dir_name else project_dir_name
+    # Dir names encode the full path with / replaced by -, e.g. "-Users-foo-Documents-my-project"
+    # Reconstruct the real path, then take the last component to preserve hyphens in folder names
+    home_prefix = str(Path.home()).replace("/", "-").lstrip("-")  # e.g. "Users-williamleung"
+    name = project_dir_name.lstrip("-")
+    if name.startswith(home_prefix + "-"):
+        name = name[len(home_prefix) + 1:]  # strip "Users-williamleung-"
+        # Strip one more path segment (Documents, Desktop, etc.)
+        if "-" in name:
+            name = name.split("-", 1)[1]  # strip "Documents-" or "Desktop-"
+    project_name = name or project_dir_name
 
     duration_minutes = 0
     if first_ts and last_ts:
@@ -204,6 +261,9 @@ def parse_jsonl_session(path, project_dir_name):
         "assistant_message_count": assistant_messages,
         "tool_calls": tool_calls,
         "models": list(models_used),
+        "hourly_tokens": hourly_tokens,
+        "last_prompt": last_user_prompt,
+        "last_prompt_tokens": last_prompt_response_tokens,
     }
 
 
@@ -214,6 +274,18 @@ def filter_today(sessions):
         s for s in sessions
         if datetime.fromisoformat(s["last_activity"]).astimezone(LOCAL_TZ).date() == today
         or datetime.fromisoformat(s["start_time"]).astimezone(LOCAL_TZ).date() == today
+    ]
+
+
+def filter_this_week(sessions):
+    """Filter sessions with activity this week (Monday-Sunday, Pacific time)."""
+    now = datetime.now(LOCAL_TZ)
+    monday = (now - timedelta(days=now.weekday())).date()
+    sunday = monday + timedelta(days=6)
+    return [
+        s for s in sessions
+        if monday <= datetime.fromisoformat(s["last_activity"]).astimezone(LOCAL_TZ).date() <= sunday
+        or monday <= datetime.fromisoformat(s["start_time"]).astimezone(LOCAL_TZ).date() <= sunday
     ]
 
 
@@ -233,6 +305,17 @@ def aggregate_tokens(sessions):
     total_cache_read = sum(s.get("cache_read_tokens", 0) for s in sessions)
     total_cache_create = sum(s.get("cache_create_tokens", 0) for s in sessions)
     return total_input, total_output, total_cache_read, total_cache_create
+
+
+def aggregate_hourly(sessions):
+    """Merge hourly token data across sessions into a 24-hour array."""
+    hourly = [0] * 24
+    for s in sessions:
+        for hour_str, tokens in s.get("hourly_tokens", {}).items():
+            hour = int(hour_str)
+            if 0 <= hour < 24:
+                hourly[hour] += tokens
+    return hourly
 
 
 def calc_burn_rate(sessions):
@@ -261,7 +344,7 @@ def format_tokens(n):
 
 def build_header():
     now = datetime.now(LOCAL_TZ)
-    tz_name = now.strftime("%Z")  # PDT or PST
+    tz_name = now.strftime("%Z")
     return Panel(
         Align.center(
             Text(f"Claude Code Usage Monitor  |  {now.strftime('%Y-%m-%d %H:%M:%S')} {tz_name}", style="bold cyan")
@@ -271,9 +354,12 @@ def build_header():
     )
 
 
-def build_token_panel(today_sessions, rolling_sessions):
+def build_token_panel(today_sessions, rolling_sessions, week_sessions):
     today_in, today_out, today_cr, today_cc = aggregate_tokens(today_sessions)
     today_total = today_in + today_out + today_cr + today_cc
+
+    week_in, week_out, week_cr, week_cc = aggregate_tokens(week_sessions)
+    week_total = week_in + week_out + week_cr + week_cc
 
     rolling_in, rolling_out, rolling_cr, rolling_cc = aggregate_tokens(rolling_sessions)
     rolling_total = rolling_in + rolling_out + rolling_cr + rolling_cc
@@ -288,27 +374,66 @@ def build_token_panel(today_sessions, rolling_sessions):
         bar_style = "red bold"
 
     today_cost = estimate_cost(today_sessions)
+    week_cost = estimate_cost(week_sessions)
     rolling_cost = estimate_cost(rolling_sessions)
 
-    lines = [
-        f"[bold white]Today Total:[/]     {format_tokens(today_total)}  [bold yellow]{format_cost(today_cost)}[/]",
-        f"  Input:           {format_tokens(today_in)}",
-        f"  Output:          {format_tokens(today_out)}",
-        f"  Cache Read:      {format_tokens(today_cr)}",
-        f"  Cache Create:    {format_tokens(today_cc)}",
-        "",
-        f"[bold white]5h Window:[/]       {format_tokens(rolling_total)}  [bold yellow]{format_cost(rolling_cost)}[/]",
-        "",
-        f"[bold white]Rate Limit (est.):[/]  [{bar_style}]{usage_pct:.0%}[/]",
-    ]
+    # Token type breakdown bar
+    breakdown = horizontal_bar([
+        (today_in, "bright_blue", "input"),
+        (today_out, "bright_green", "output"),
+        (today_cr, "bright_cyan", "cache read"),
+        (today_cc, "bright_magenta", "cache create"),
+    ], width=36)
+
+    # Left column: totals
+    left = Text()
+    left.append("Today ", style="bold white")
+    left.append(f"{format_tokens(today_total)} ", style="bold white")
+    left.append(f"{format_cost(today_cost)}\n", style="bold yellow")
+    left.append(f" In:  {format_tokens(today_in)}\n")
+    left.append(f" Out: {format_tokens(today_out)}\n")
+    left.append(f" C/R: {format_tokens(today_cr)}\n")
+    left.append(f" C/W: {format_tokens(today_cc)}\n\n")
+    left.append("Week ", style="bold white")
+    left.append(f"{format_tokens(week_total)} ", style="bold white")
+    left.append(f"{format_cost(week_cost)}\n", style="bold yellow")
+    left.append(f" In:  {format_tokens(week_in)}\n")
+    left.append(f" Out: {format_tokens(week_out)}\n")
+    left.append(f" C/R: {format_tokens(week_cr)}\n")
+    left.append(f" C/W: {format_tokens(week_cc)}\n")
+
+    # Right column: breakdown bar + rate limit
+    right = Text()
+    right.append("Today Breakdown:\n", style="bold white")
+    right.append("  ")
+    right.append_text(breakdown)
+    right.append("\n  ")
+    right.append("██", style="bright_blue")
+    right.append(" in ", style="dim")
+    right.append("██", style="bright_green")
+    right.append(" out\n  ", style="dim")
+    right.append("██", style="bright_cyan")
+    right.append(" cache-r ", style="dim")
+    right.append("██", style="bright_magenta")
+    right.append(" cache-w\n\n", style="dim")
+    right.append(f"5h Window:\n", style="bold white")
+    right.append(f"  {format_tokens(rolling_total)}  ", style="bold white")
+    right.append(f"{format_cost(rolling_cost)}\n\n", style="bold yellow")
+    right.append("Rate Limit (est.):\n", style="bold white")
+    right.append(f"  {usage_pct:.0%}\n", style=bar_style)
 
     bar = ProgressBar(total=100, completed=int(usage_pct * 100), style=bar_style, complete_style=bar_style)
 
-    table = Table.grid(padding=(0, 1))
-    table.add_row("\n".join(lines))
-    table.add_row(bar)
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(ratio=1)
+    grid.add_column(ratio=1)
+    grid.add_row(left, right)
 
-    return Panel(table, title="Token Usage", border_style="green")
+    outer = Table.grid(padding=(0, 1))
+    outer.add_row(grid)
+    outer.add_row(bar)
+
+    return Panel(outer, title="Token Usage", border_style="green")
 
 
 def build_burn_panel(today_sessions):
@@ -317,7 +442,6 @@ def build_burn_panel(today_sessions):
     today_total = inp + out + cr + cc
     today_cost = estimate_cost(today_sessions)
 
-    # Cost per hour
     timestamps = []
     for s in today_sessions:
         timestamps.append(datetime.fromisoformat(s["start_time"]))
@@ -343,28 +467,70 @@ def build_burn_panel(today_sessions):
     total_msgs = sum(s.get("user_message_count", 0) for s in today_sessions)
     total_tools = sum(s.get("tool_calls", 0) for s in today_sessions)
 
-    # Find active sessions (activity in last 10 minutes)
     ten_min_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
     active = [
         s for s in today_sessions
         if datetime.fromisoformat(s["last_activity"]) >= ten_min_ago
     ]
 
-    lines = [
-        f"[bold white]Burn Rate:[/]      {format_tokens(int(rate))}/hr  [bold yellow]{format_cost(cost_per_hr)}/hr[/]",
-        f"[bold white]Est. Remaining:[/] {time_left} until limit",
-        "",
-        f"[bold white]Sessions Today:[/] {len(today_sessions)}",
-        f"[bold white]Active Now:[/]     [bold green]{len(active)}[/]" if active else f"[bold white]Active Now:[/]     [dim]0[/]",
-        f"[bold white]Messages:[/]       {total_msgs}",
-        f"[bold white]Tool Calls:[/]     {total_tools}",
-    ]
+    # Hourly sparkline
+    hourly = aggregate_hourly(today_sessions)
+    current_hour = datetime.now(LOCAL_TZ).hour
+    # Show from hour 6 (6am) to current hour
+    start_hour = 6
+    end_hour = current_hour + 1
+    visible_hours = hourly[start_hour:end_hour] if end_hour > start_hour else hourly[start_hour:]
 
-    return Panel("\n".join(lines), title="Burn Rate & Activity", border_style="yellow")
+    # Left column: stats
+    left = Text()
+    left.append(f"Burn Rate:      ", style="bold white")
+    left.append(f"{format_tokens(int(rate))}/hr\n", style="bold white")
+    left.append(f"                ", style="bold white")
+    left.append(f"{format_cost(cost_per_hr)}/hr\n", style="bold yellow")
+    left.append(f"Est. Remaining: {time_left}\n\n", style="bold white")
+    left.append(f"Sessions Today: {len(today_sessions)}\n", style="bold white")
+    if active:
+        left.append(f"Active Now:     {len(active)}\n", style="bold green")
+    else:
+        left.append(f"Active Now:     0\n", style="dim")
+    left.append(f"Messages:       {total_msgs}\n", style="bold white")
+    left.append(f"Tool Calls:     {total_tools}\n", style="bold white")
+
+    # Right column: vertical hourly bar chart (takes more space)
+    right = Text()
+    right.append("Hourly Usage:\n", style="bold white")
+    max_val = max(visible_hours) if visible_hours and max(visible_hours) > 0 else 1
+    chart_height = 3
+    for row in range(chart_height, 0, -1):
+        threshold = max_val * row / chart_height
+        right.append(" ", style="dim")
+        for val in visible_hours:
+            if val >= threshold and val > 0:
+                right.append("██", style="bright_yellow")
+            else:
+                right.append("  ", style="dim")
+            right.append(" ", style="dim")
+        right.append("\n")
+    # Hour labels — every hour
+    right.append(" ", style="dim")
+    for i in range(len(visible_hours)):
+        h = start_hour + i
+        display_h = h if h <= 12 else h - 12
+        suffix = "a" if h < 12 else "p"
+        label = f"{display_h}{suffix}"
+        right.append(f"{label:<3}", style="dim")
+    right.append("\n Peak: ", style="dim")
+    right.append(f"{format_tokens(max_val)}", style="bold white")
+
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(width=30)
+    grid.add_column(ratio=1)
+    grid.add_row(left, right)
+
+    return Panel(grid, title="Burn Rate & Activity", border_style="yellow")
 
 
 def build_projects_panel(today_sessions, all_sessions):
-    # Only show projects with activity today
     today_by_project = {}
     for s in today_sessions:
         name = s.get("project_name", "unknown")
@@ -372,7 +538,6 @@ def build_projects_panel(today_sessions, all_sessions):
             today_by_project[name] = []
         today_by_project[name].append(s)
 
-    # Get all-time totals only for projects active today
     all_by_project = {}
     for s in all_sessions:
         name = s.get("project_name", "unknown")
@@ -403,11 +568,9 @@ def build_projects_panel(today_sessions, all_sessions):
         today_cost = estimate_cost(today_s)
         all_cost = estimate_cost(all_s)
 
-        # Collect models used today for this project
         project_models = set()
         for s in today_s:
             project_models.update(s.get("models", []))
-        # Shorten model names: "claude-opus-4-6" -> "opus 4.6"
         short_models = []
         for m in sorted(project_models):
             parts = m.replace("claude-", "").split("-")
@@ -453,7 +616,6 @@ def build_recent_panel(sessions):
         msgs = s.get("user_message_count", 0)
         cost = estimate_cost([s])
 
-        # Highlight if active in last 10 min
         ten_min_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
         last_utc = datetime.fromisoformat(s["last_activity"])
         style = "bold green" if last_utc >= ten_min_ago else ""
@@ -470,25 +632,68 @@ def build_recent_panel(sessions):
     return Panel(table, title="Recent Sessions", border_style="magenta")
 
 
+def build_last_prompt_panel(today_sessions):
+    """Show the last prompt per active project with token usage."""
+    # Get the most recent session per project
+    by_project = {}
+    for s in today_sessions:
+        name = s.get("project_name", "unknown")
+        if name not in by_project or s["last_activity"] > by_project[name]["last_activity"]:
+            by_project[name] = s
+
+    table = Table(expand=True)
+    table.add_column("Project", style="cyan", width=20)
+    table.add_column("Last Prompt", style="white", ratio=1)
+    table.add_column("Tokens", justify="right", style="bold", width=10)
+    table.add_column("Cost", justify="right", style="yellow", width=8)
+
+    sorted_projects = sorted(by_project.items(), key=lambda x: x[1]["last_activity"], reverse=True)
+    for name, s in sorted_projects:
+        prompt = s.get("last_prompt") or ""
+        # Truncate to ~80 chars with ellipsis
+        if len(prompt) > 80:
+            prompt = prompt[:77] + "..."
+        prompt = prompt.replace("\n", " ")
+
+        tok = s.get("last_prompt_tokens", {})
+        total = tok.get("input", 0) + tok.get("output", 0) + tok.get("cache_read", 0) + tok.get("cache_create", 0)
+        cost = (
+            tok.get("input", 0) / 1_000_000 * 5.0
+            + tok.get("output", 0) / 1_000_000 * 25.0
+            + tok.get("cache_read", 0) / 1_000_000 * 0.5
+            + tok.get("cache_create", 0) / 1_000_000 * 6.25
+        )
+
+        table.add_row(name, prompt, format_tokens(total), format_cost(cost))
+
+    if not by_project:
+        table.add_row("[dim]No sessions today[/]", "", "", "")
+
+    return Panel(table, title="Last Prompt per Project", border_style="bright_white")
+
+
 def build_dashboard():
     all_sessions = scan_live_sessions()
     today_sessions = filter_today(all_sessions)
+    week_sessions = filter_this_week(all_sessions)
     rolling_sessions = filter_rolling_5h(all_sessions)
 
     layout = Layout()
     layout.split_column(
         Layout(build_header(), name="header", size=3),
-        Layout(name="top", size=13),
-        Layout(name="bottom"),
+        Layout(name="top"),
+        Layout(name="middle"),
+        Layout(name="bottom", size=min(len(set(s["project_name"] for s in today_sessions)) + 5, 12)),
     )
     layout["top"].split_row(
-        Layout(build_token_panel(today_sessions, rolling_sessions), name="tokens"),
+        Layout(build_token_panel(today_sessions, rolling_sessions, week_sessions), name="tokens"),
         Layout(build_burn_panel(today_sessions), name="burn"),
     )
-    layout["bottom"].split_row(
+    layout["middle"].split_row(
         Layout(build_projects_panel(today_sessions, all_sessions), name="projects"),
         Layout(build_recent_panel(all_sessions), name="recent"),
     )
+    layout["bottom"].update(build_last_prompt_panel(today_sessions))
     return layout
 
 
