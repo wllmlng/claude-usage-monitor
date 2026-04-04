@@ -1,0 +1,266 @@
+"""Session parsing, caching, filtering, and aggregation."""
+
+import json
+from datetime import date as date_type, datetime, timezone, timedelta
+from pathlib import Path
+
+from constants import PROJECTS_DIR, LOCAL_TZ, MODEL_PRICING
+
+
+# Cache: path -> (mtime, file_size, parsed_session)
+_session_cache: dict[str, tuple[float, int, dict]] = {}
+
+
+def scan_live_sessions():
+    """Scan JSONL conversation logs with caching."""
+    global _session_cache
+    sessions = []
+    if not PROJECTS_DIR.exists():
+        return sessions
+
+    seen_paths = set()
+
+    for project_dir in PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for jsonl_path in project_dir.glob("*.jsonl"):
+            path_key = str(jsonl_path)
+            seen_paths.add(path_key)
+
+            try:
+                stat = jsonl_path.stat()
+                mtime = stat.st_mtime
+                size = stat.st_size
+            except OSError:
+                continue
+
+            cached = _session_cache.get(path_key)
+            if cached and cached[0] == mtime and cached[1] == size and "daily_messages" in cached[2]:
+                sessions.append(cached[2])
+                continue
+
+            session = parse_jsonl_session(jsonl_path, project_dir.name)
+            if session:
+                _session_cache[path_key] = (mtime, size, session)
+                sessions.append(session)
+
+    for key in list(_session_cache.keys()):
+        if key not in seen_paths:
+            del _session_cache[key]
+
+    return sessions
+
+
+def parse_jsonl_session(path, project_dir_name):
+    """Parse a JSONL conversation log and extract token usage."""
+    input_tokens = 0
+    output_tokens = 0
+    cache_read = 0
+    cache_create = 0
+    user_messages = 0
+    assistant_messages = 0
+    tool_calls = 0
+    models_used = set()
+    first_ts = None
+    last_ts = None
+    session_id = path.stem
+    hourly_tokens = {}
+    daily_tokens = {}
+    daily_messages = {}
+    last_user_prompt = None
+    last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+    tracking_last_prompt = False
+
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                ts_str = entry.get("timestamp")
+                if ts_str:
+                    ts = datetime.fromisoformat(ts_str)
+                    if first_ts is None or ts < first_ts:
+                        first_ts = ts
+                    if last_ts is None or ts > last_ts:
+                        last_ts = ts
+
+                msg = entry.get("message", {})
+                role = msg.get("role")
+                usage = msg.get("usage", {})
+
+                if role == "user" and entry.get("type") == "user":
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        user_messages += 1
+                        last_user_prompt = content
+                        last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+                        tracking_last_prompt = True
+                        if ts_str:
+                            msg_day = datetime.fromisoformat(ts_str).astimezone(LOCAL_TZ).date().isoformat()
+                            daily_messages[msg_day] = daily_messages.get(msg_day, 0) + 1
+
+                if role == "assistant":
+                    assistant_messages += 1
+                    model = msg.get("model", "")
+                    if model:
+                        models_used.add(model)
+
+                    msg_input = usage.get("input_tokens", 0)
+                    msg_output = usage.get("output_tokens", 0)
+                    msg_cache_r = usage.get("cache_read_input_tokens", 0)
+                    msg_cache_c = usage.get("cache_creation_input_tokens", 0)
+
+                    input_tokens += msg_input
+                    output_tokens += msg_output
+                    cache_read += msg_cache_r
+                    cache_create += msg_cache_c
+
+                    if tracking_last_prompt:
+                        last_prompt_response_tokens["input"] += msg_input
+                        last_prompt_response_tokens["output"] += msg_output
+                        last_prompt_response_tokens["cache_read"] += msg_cache_r
+                        last_prompt_response_tokens["cache_create"] += msg_cache_c
+
+                    if ts_str:
+                        local_dt = datetime.fromisoformat(ts_str).astimezone(LOCAL_TZ)
+                        hour = local_dt.hour
+                        hourly_tokens[hour] = hourly_tokens.get(hour, 0) + msg_input + msg_output + msg_cache_r + msg_cache_c
+
+                        day_key = local_dt.date().isoformat()
+                        if day_key not in daily_tokens:
+                            daily_tokens[day_key] = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+                        daily_tokens[day_key]["input"] += msg_input
+                        daily_tokens[day_key]["output"] += msg_output
+                        daily_tokens[day_key]["cache_read"] += msg_cache_r
+                        daily_tokens[day_key]["cache_create"] += msg_cache_c
+
+                    for block in msg.get("content", []):
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            tool_calls += 1
+
+    except OSError:
+        return None
+
+    if first_ts is None:
+        return None
+
+    home_prefix = str(Path.home()).replace("/", "-").lstrip("-")
+    name = project_dir_name.lstrip("-")
+    if name.startswith(home_prefix + "-"):
+        name = name[len(home_prefix) + 1:]
+        if "-" in name:
+            name = name.split("-", 1)[1]
+    project_name = name or project_dir_name
+
+    duration_minutes = 0
+    if first_ts and last_ts:
+        duration_minutes = int((last_ts - first_ts).total_seconds() / 60)
+
+    return {
+        "session_id": session_id,
+        "project_name": project_name,
+        "start_time": first_ts.isoformat(),
+        "last_activity": last_ts.isoformat(),
+        "duration_minutes": duration_minutes,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_create_tokens": cache_create,
+        "user_message_count": user_messages,
+        "assistant_message_count": assistant_messages,
+        "tool_calls": tool_calls,
+        "models": list(models_used),
+        "hourly_tokens": hourly_tokens,
+        "last_prompt": last_user_prompt,
+        "last_prompt_tokens": last_prompt_response_tokens,
+        "daily_tokens": daily_tokens,
+        "daily_messages": daily_messages,
+    }
+
+
+def filter_today(sessions):
+    """Filter sessions that have activity today (Pacific time)."""
+    today = datetime.now(LOCAL_TZ).date()
+    return [
+        s for s in sessions
+        if datetime.fromisoformat(s["last_activity"]).astimezone(LOCAL_TZ).date() == today
+        or datetime.fromisoformat(s["start_time"]).astimezone(LOCAL_TZ).date() == today
+    ]
+
+
+def aggregate_tokens(sessions):
+    """Sum tokens across sessions."""
+    total_input = sum(s.get("input_tokens", 0) for s in sessions)
+    total_output = sum(s.get("output_tokens", 0) for s in sessions)
+    total_cache_read = sum(s.get("cache_read_tokens", 0) for s in sessions)
+    total_cache_create = sum(s.get("cache_create_tokens", 0) for s in sessions)
+    return total_input, total_output, total_cache_read, total_cache_create
+
+
+def aggregate_hourly(sessions):
+    """Merge hourly token data across sessions into a 24-hour array."""
+    hourly = [0] * 24
+    for s in sessions:
+        for hour_str, tokens in s.get("hourly_tokens", {}).items():
+            hour = int(hour_str)
+            if 0 <= hour < 24:
+                hourly[hour] += tokens
+    return hourly
+
+
+def aggregate_tokens_for_dates(sessions, start_date, end_date):
+    """Sum only tokens that occurred within the date range using daily_tokens."""
+    total_in, total_out, total_cr, total_cc = 0, 0, 0, 0
+    for s in sessions:
+        for day_str, tok in s.get("daily_tokens", {}).items():
+            d = date_type.fromisoformat(day_str)
+            if start_date <= d <= end_date:
+                total_in += tok["input"]
+                total_out += tok["output"]
+                total_cr += tok["cache_read"]
+                total_cc += tok["cache_create"]
+    return total_in, total_out, total_cr, total_cc
+
+
+def estimate_cost_for_dates(sessions, start_date, end_date):
+    """Estimate cost for tokens within a date range, using each session's model pricing."""
+    total_cost = 0.0
+    for s in sessions:
+        models = s.get("models", [])
+        model_str = " ".join(models).lower()
+        if "opus" in model_str:
+            pricing = MODEL_PRICING["opus"]
+        elif "haiku" in model_str:
+            pricing = MODEL_PRICING["haiku"]
+        else:
+            pricing = MODEL_PRICING["sonnet"]
+
+        for day_str, tok in s.get("daily_tokens", {}).items():
+            d = date_type.fromisoformat(day_str)
+            if start_date <= d <= end_date:
+                total_cost += tok["input"] / 1_000_000 * pricing["input"]
+                total_cost += tok["output"] / 1_000_000 * pricing["output"]
+                total_cost += tok["cache_read"] / 1_000_000 * pricing["cache_read"]
+                total_cost += tok["cache_create"] / 1_000_000 * pricing["cache_create"]
+    return total_cost
+
+
+def calc_burn_rate(sessions):
+    """Tokens per hour based on session activity window."""
+    if not sessions:
+        return 0.0
+    timestamps = []
+    for s in sessions:
+        timestamps.append(datetime.fromisoformat(s["start_time"]))
+        timestamps.append(datetime.fromisoformat(s["last_activity"]))
+    earliest = min(timestamps)
+    now = datetime.now(timezone.utc)
+    hours = max((now - earliest).total_seconds() / 3600, 0.1)
+    inp, out, cache_r, cache_c = aggregate_tokens(sessions)
+    return (inp + out + cache_r + cache_c) / hours
