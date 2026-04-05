@@ -33,11 +33,11 @@ def build_dashboard():
     layout["top"].split_row(
         Layout(build_token_panel(all_sessions), name="tokens"),
         Layout(build_burn_panel(today_sessions), name="burn"),
+        Layout(build_calendar_panel(all_sessions), name="calendar"),
     )
     layout["middle"].split_row(
         Layout(build_projects_panel(today_sessions, all_sessions), name="projects"),
         Layout(build_recent_panel(all_sessions), name="recent"),
-        Layout(build_calendar_panel(all_sessions), name="calendar"),
     )
     layout["bottom"].update(build_last_prompt_panel(today_sessions))
     return layout

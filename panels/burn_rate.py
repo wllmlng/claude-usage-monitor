@@ -5,23 +5,17 @@ from rich.table import Table
 from rich.text import Text
 
 from constants import LOCAL_TZ
-from data import calc_burn_rate, aggregate_hourly, aggregate_tokens
+from data import calc_burn_rate, aggregate_hourly, estimate_cost_for_dates
 from utils import estimate_cost, format_tokens, format_cost
 
 
 def build_burn_panel(today_sessions):
     rate = calc_burn_rate(today_sessions)
-    today_cost = estimate_cost(today_sessions)
-
-    timestamps = []
-    for s in today_sessions:
-        timestamps.append(datetime.fromisoformat(s["start_time"]))
-        timestamps.append(datetime.fromisoformat(s["last_activity"]))
-    if timestamps:
-        hours_active = max((datetime.now(timezone.utc) - min(timestamps)).total_seconds() / 3600, 0.1)
-        cost_per_hr = today_cost / hours_active
-    else:
-        cost_per_hr = 0.0
+    today = datetime.now(LOCAL_TZ).date()
+    today_cost = estimate_cost_for_dates(today_sessions, today, today)
+    now = datetime.now(LOCAL_TZ)
+    hours_today = max((now - datetime.combine(today, datetime.min.time(), tzinfo=LOCAL_TZ)).total_seconds() / 3600, 0.1)
+    cost_per_hr = today_cost / hours_today
 
     total_msgs = sum(s.get("user_message_count", 0) for s in today_sessions)
     total_tools = sum(s.get("tool_calls", 0) for s in today_sessions)

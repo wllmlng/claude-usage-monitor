@@ -252,15 +252,12 @@ def estimate_cost_for_dates(sessions, start_date, end_date):
 
 
 def calc_burn_rate(sessions):
-    """Tokens per hour based on session activity window."""
-    if not sessions:
+    """Today's tokens per hour based on hours elapsed today."""
+    today = datetime.now(LOCAL_TZ).date()
+    inp, out, cache_r, cache_c = aggregate_tokens_for_dates(sessions, today, today)
+    total = inp + out + cache_r + cache_c
+    if total == 0:
         return 0.0
-    timestamps = []
-    for s in sessions:
-        timestamps.append(datetime.fromisoformat(s["start_time"]))
-        timestamps.append(datetime.fromisoformat(s["last_activity"]))
-    earliest = min(timestamps)
-    now = datetime.now(timezone.utc)
-    hours = max((now - earliest).total_seconds() / 3600, 0.1)
-    inp, out, cache_r, cache_c = aggregate_tokens(sessions)
-    return (inp + out + cache_r + cache_c) / hours
+    now = datetime.now(LOCAL_TZ)
+    hours_today = max((now - datetime.combine(today, datetime.min.time(), tzinfo=LOCAL_TZ)).total_seconds() / 3600, 0.1)
+    return total / hours_today

@@ -63,7 +63,7 @@ def build_token_panel(all_sessions):
     left.append("Month ", style="bold white")
     left.append(f"{format_tokens(month_total)} ", style="bold white")
     left.append(f"{format_cost(month_cost)}\n\n", style="bold yellow")
-    left.append("Avg/Prompt (today) ", style="dim")
+    left.append("Avg Cost/Prompt (today) ", style="dim")
     left.append(f"{format_cost(avg_cost)}\n", style="bold yellow")
 
     # Right column: breakdown bar
