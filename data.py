@@ -7,6 +7,9 @@ from pathlib import Path
 from constants import PROJECTS_DIR, LOCAL_TZ, MODEL_PRICING
 
 
+# Bump this when the parsed session schema changes to invalidate stale caches
+_CACHE_VERSION = 4
+
 # Cache: path -> (mtime, file_size, parsed_session)
 _session_cache: dict[str, tuple[float, int, dict]] = {}
 
@@ -35,7 +38,7 @@ def scan_live_sessions():
                 continue
 
             cached = _session_cache.get(path_key)
-            if cached and cached[0] == mtime and cached[1] == size and "daily_messages" in cached[2]:
+            if cached and cached[0] == mtime and cached[1] == size and cached[2].get("_cache_version") == _CACHE_VERSION:
                 sessions.append(cached[2])
                 continue
 
@@ -96,9 +99,20 @@ def parse_jsonl_session(path, project_dir_name):
 
                 if role == "user" and entry.get("type") == "user":
                     content = msg.get("content")
+                    prompt_text = None
                     if isinstance(content, str):
+                        prompt_text = content
+                    elif isinstance(content, list) and content:
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                prompt_text = block.get("text", "")
+                                break
+                            elif isinstance(block, str):
+                                prompt_text = block
+                                break
+                    if prompt_text is not None:
                         user_messages += 1
-                        last_user_prompt = content
+                        last_user_prompt = prompt_text
                         last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
                         tracking_last_prompt = True
                         if ts_str:
@@ -129,8 +143,9 @@ def parse_jsonl_session(path, project_dir_name):
 
                     if ts_str:
                         local_dt = datetime.fromisoformat(ts_str).astimezone(LOCAL_TZ)
-                        hour = local_dt.hour
-                        hourly_tokens[hour] = hourly_tokens.get(hour, 0) + msg_input + msg_output + msg_cache_r + msg_cache_c
+                        hour_key = f"{local_dt.date().isoformat()}:{local_dt.hour}"
+                        msg_total = msg_input + msg_output + msg_cache_r + msg_cache_c
+                        hourly_tokens[hour_key] = hourly_tokens.get(hour_key, 0) + msg_total
 
                         day_key = local_dt.date().isoformat()
                         if day_key not in daily_tokens:
@@ -181,6 +196,7 @@ def parse_jsonl_session(path, project_dir_name):
         "last_prompt_tokens": last_prompt_response_tokens,
         "daily_tokens": daily_tokens,
         "daily_messages": daily_messages,
+        "_cache_version": _CACHE_VERSION,
     }
 
 
@@ -203,14 +219,22 @@ def aggregate_tokens(sessions):
     return total_input, total_output, total_cache_read, total_cache_create
 
 
-def aggregate_hourly(sessions):
-    """Merge hourly token data across sessions into a 24-hour array."""
+def aggregate_hourly(sessions, target_date=None):
+    """Merge hourly token data across sessions into a 24-hour array.
+
+    If target_date is provided, only include tokens from that date.
+    hourly_tokens keys are "YYYY-MM-DD:HH" format.
+    """
+    if target_date is None:
+        target_date = datetime.now(LOCAL_TZ).date()
+    date_prefix = target_date.isoformat() + ":"
     hourly = [0] * 24
     for s in sessions:
-        for hour_str, tokens in s.get("hourly_tokens", {}).items():
-            hour = int(hour_str)
-            if 0 <= hour < 24:
-                hourly[hour] += tokens
+        for key, tokens in s.get("hourly_tokens", {}).items():
+            if key.startswith(date_prefix):
+                hour = int(key.split(":")[1])
+                if 0 <= hour < 24:
+                    hourly[hour] += tokens
     return hourly
 
 
@@ -229,7 +253,11 @@ def aggregate_tokens_for_dates(sessions, start_date, end_date):
 
 
 def estimate_cost_for_dates(sessions, start_date, end_date):
-    """Estimate cost for tokens within a date range, using each session's model pricing."""
+    """Estimate cost for tokens within a date range, using each session's model pricing.
+
+    Note: pricing is determined per-session, not per-message. If a session uses
+    multiple models, the most expensive one (opus) is used as an upper-bound estimate.
+    """
     total_cost = 0.0
     for s in sessions:
         models = s.get("models", [])
