@@ -7,4 +7,5 @@ Reads session data directly from `~/.claude/projects/` JSONL logs — no API key
 - **Token Usage** — Today and weekly totals with per-type breakdown (input, output, cache read, cache create)
 - **Estimated Cost** — What your usage would cost at API pricing (Opus, Sonnet, Haiku)
 
-<img width="1700" height="450" alt="Screenshot 2026-04-02 at 09 07 38" src="https://github.com/user-attachments/assets/65e933a7-e79b-4eb6-a0bc-606b1d9913e3" />
+<img width="1728" height="655" alt="Screenshot 2026-04-06 at 16 26 18" src="https://github.com/user-attachments/assets/2078c9e1-f3c5-4f3e-aed1-90adf201bb3a" />
+
