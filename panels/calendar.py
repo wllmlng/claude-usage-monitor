@@ -66,16 +66,14 @@ def build_calendar_panel(all_sessions):
                 cost = daily_cost.get(d, 0)
                 if cost == 0:
                     style = "dim"
+                elif cost >= 30:
+                    style = "bold red"
+                elif cost >= 20:
+                    style = "rgb(255,165,0)"
+                elif cost >= 10:
+                    style = "bold yellow"
                 else:
-                    ratio = cost / max_cost if max_cost > 0 else 0
-                    if ratio > 0.75:
-                        style = "bold red"
-                    elif ratio > 0.5:
-                        style = "bold yellow"
-                    elif ratio > 0.25:
-                        style = "bold green"
-                    else:
-                        style = "green"
+                    style = "green"
                 lines.append(f"  {day:>2}  ", style=style)
         lines.append("\n")
         # Cost row
@@ -89,13 +87,12 @@ def build_calendar_panel(all_sessions):
                 if cost == 0:
                     lines.append("   ·  ", style="dim")
                 else:
-                    ratio = cost / max_cost if max_cost > 0 else 0
-                    if ratio > 0.75:
+                    if cost >= 30:
                         style = "bold red"
-                    elif ratio > 0.5:
+                    elif cost >= 20:
+                        style = "rgb(255,165,0)"
+                    elif cost >= 10:
                         style = "bold yellow"
-                    elif ratio > 0.25:
-                        style = "bold green"
                     else:
                         style = "green"
                     cost_str = f"${cost:.0f}" if cost >= 10 else f"${cost:.1f}"
@@ -106,11 +103,11 @@ def build_calendar_panel(all_sessions):
     lines.append("  ", style="dim")
     lines.append("██", style="green")
     lines.append("<$10 ", style="dim")
-    lines.append("██", style="bold green")
-    lines.append("<$25 ", style="dim")
     lines.append("██", style="bold yellow")
-    lines.append("<$50 ", style="dim")
+    lines.append("<$20 ", style="dim")
+    lines.append("██", style="rgb(255,165,0)")
+    lines.append("<$30 ", style="dim")
     lines.append("██", style="bold red")
-    lines.append("$50+", style="dim")
+    lines.append("$30+", style="dim")
 
     return Panel(lines, title="Monthly Usage", border_style="bright_cyan")

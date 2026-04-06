@@ -16,6 +16,7 @@ def build_last_prompt_panel(today_sessions):
     table.add_column("Project", style="cyan", width=20)
     table.add_column("Last Prompt", style="white", ratio=1)
     table.add_column("C/R", justify="right", style="bright_cyan", width=8)
+    table.add_column("Model", style="bright_white", width=16)
     table.add_column("Tokens", justify="right", style="bold", width=10)
     table.add_column("Cost", justify="right", style="yellow", width=8)
 
@@ -36,7 +37,15 @@ def build_last_prompt_panel(today_sessions):
         )
 
         cache_read = tok.get("cache_read", 0)
-        table.add_row(name, prompt, format_tokens(cache_read), format_tokens(total), format_cost(cost))
+        model = s.get("last_prompt_model", "—") or "—"
+        # Extract short model name with version (e.g., "claude-opus-4-6" → "opus-4.6")
+        if model != "—" and model.startswith("claude-"):
+            parts = model.replace("claude-", "").split("-")
+            if len(parts) > 1:
+                model = parts[0] + "-" + ".".join(parts[1:3])
+            else:
+                model = parts[0]
+        table.add_row(name, prompt, format_tokens(cache_read), model, format_tokens(total), format_cost(cost))
 
     if not by_project:
         table.add_row("[dim]No sessions today[/]", "", "", "", "")

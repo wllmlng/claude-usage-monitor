@@ -72,6 +72,7 @@ def parse_jsonl_session(path, project_dir_name):
     daily_messages = {}
     last_user_prompt = None
     last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+    last_prompt_model = None
     tracking_last_prompt = False
 
     try:
@@ -140,6 +141,8 @@ def parse_jsonl_session(path, project_dir_name):
                         last_prompt_response_tokens["output"] += msg_output
                         last_prompt_response_tokens["cache_read"] += msg_cache_r
                         last_prompt_response_tokens["cache_create"] += msg_cache_c
+                        if model:
+                            last_prompt_model = model
 
                     if ts_str:
                         local_dt = datetime.fromisoformat(ts_str).astimezone(LOCAL_TZ)
@@ -193,6 +196,7 @@ def parse_jsonl_session(path, project_dir_name):
         "models": list(models_used),
         "hourly_tokens": hourly_tokens,
         "last_prompt": last_user_prompt,
+        "last_prompt_model": last_prompt_model,
         "last_prompt_tokens": last_prompt_response_tokens,
         "daily_tokens": daily_tokens,
         "daily_messages": daily_messages,

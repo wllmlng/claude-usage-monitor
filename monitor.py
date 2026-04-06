@@ -27,7 +27,7 @@ def build_dashboard():
     layout.split_column(
         Layout(build_header(), name="header", size=3),
         Layout(name="top"),
-        Layout(name="middle"),
+        Layout(name="middle", size=12),
         Layout(name="bottom", size=min(len(set(s["project_name"] for s in today_sessions)) + 5, 12)),
     )
     layout["top"].split_row(
