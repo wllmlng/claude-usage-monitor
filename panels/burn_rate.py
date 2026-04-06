@@ -51,13 +51,19 @@ def build_burn_panel(today_sessions):
     right = Text()
     right.append("Hourly Usage:\n", style="bold white")
     max_val = max(visible_hours) if visible_hours and max(visible_hours) > 0 else 1
-    chart_height = 3
+    chart_height = 7
     for row in range(chart_height, 0, -1):
         threshold = max_val * row / chart_height
+        if row > 5:
+            bar_style = "bold red"
+        elif row > 3:
+            bar_style = "rgb(255,165,0)"
+        else:
+            bar_style = "bright_yellow"
         right.append(" ", style="dim")
         for val in visible_hours:
             if val >= threshold and val > 0:
-                right.append("██", style="bright_yellow")
+                right.append("██", style=bar_style)
             else:
                 right.append("  ", style="dim")
             right.append("  ", style="dim")

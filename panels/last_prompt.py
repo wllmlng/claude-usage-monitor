@@ -15,6 +15,7 @@ def build_last_prompt_panel(today_sessions):
     table = Table(expand=True)
     table.add_column("Project", style="cyan", width=20)
     table.add_column("Last Prompt", style="white", ratio=1)
+    table.add_column("C/R", justify="right", style="bright_cyan", width=8)
     table.add_column("Tokens", justify="right", style="bold", width=10)
     table.add_column("Cost", justify="right", style="yellow", width=8)
 
@@ -34,9 +35,10 @@ def build_last_prompt_panel(today_sessions):
             + tok.get("cache_create", 0) / 1_000_000 * 6.25
         )
 
-        table.add_row(name, prompt, format_tokens(total), format_cost(cost))
+        cache_read = tok.get("cache_read", 0)
+        table.add_row(name, prompt, format_tokens(cache_read), format_tokens(total), format_cost(cost))
 
     if not by_project:
-        table.add_row("[dim]No sessions today[/]", "", "", "")
+        table.add_row("[dim]No sessions today[/]", "", "", "", "")
 
     return Panel(table, title="Last Prompt per Project", border_style="bright_white")
