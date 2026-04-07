@@ -31,9 +31,9 @@ def build_dashboard():
         Layout(name="bottom", size=min(len(set(s["project_name"] for s in today_sessions)) + 5, 12)),
     )
     layout["top"].split_row(
-        Layout(build_token_panel(all_sessions), name="tokens"),
-        Layout(build_burn_panel(today_sessions), name="burn"),
-        Layout(build_calendar_panel(all_sessions), name="calendar"),
+        Layout(build_token_panel(all_sessions), name="tokens", ratio=3),
+        Layout(build_burn_panel(today_sessions), name="burn", ratio=4),
+        Layout(build_calendar_panel(all_sessions), name="calendar", ratio=2),
     )
     layout["middle"].split_row(
         Layout(build_projects_panel(today_sessions, all_sessions), name="projects"),

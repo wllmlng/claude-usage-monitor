@@ -9,7 +9,7 @@ from utils import estimate_cost, format_tokens, format_cost
 
 
 def build_recent_panel(sessions):
-    sorted_sessions = sorted(sessions, key=lambda s: s.get("last_activity", ""), reverse=True)[:7]
+    sorted_sessions = sorted(sessions, key=lambda s: s.get("last_activity", ""), reverse=True)[:6]
 
     table = Table(expand=True)
     table.add_column("Last Active", style="dim")

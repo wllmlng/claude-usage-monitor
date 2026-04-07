@@ -113,7 +113,8 @@ def parse_jsonl_session(path, project_dir_name):
                                 break
                     if prompt_text is not None:
                         user_messages += 1
-                        last_user_prompt = prompt_text
+                        if not prompt_text.strip().startswith("/"):
+                            last_user_prompt = prompt_text
                         last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
                         tracking_last_prompt = True
                         if ts_str:

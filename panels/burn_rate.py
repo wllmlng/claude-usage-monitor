@@ -26,12 +26,20 @@ def build_burn_panel(today_sessions):
         if datetime.fromisoformat(s["last_activity"]) >= ten_min_ago
     ]
 
-    # Hourly usage chart
+    # Hourly usage chart — trim empty leading/trailing hours
     hourly = aggregate_hourly(today_sessions)
     current_hour = datetime.now(LOCAL_TZ).hour
     start_hour = 6
     end_hour = current_hour + 1
     visible_hours = hourly[start_hour:end_hour] if end_hour > start_hour else hourly[start_hour:]
+    # Trim leading zeros
+    while visible_hours and visible_hours[0] == 0:
+        start_hour += 1
+        visible_hours = visible_hours[1:]
+    # Trim trailing zeros
+    while visible_hours and visible_hours[-1] == 0:
+        end_hour -= 1
+        visible_hours = visible_hours[:-1]
 
     # Left column: stats
     left = Text()

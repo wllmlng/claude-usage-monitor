@@ -1,6 +1,7 @@
 from rich.panel import Panel
 from rich.table import Table
 
+from constants import MODEL_PRICING
 from utils import format_tokens, format_cost
 
 
@@ -29,11 +30,18 @@ def build_last_prompt_panel(today_sessions):
 
         tok = s.get("last_prompt_tokens", {})
         total = tok.get("input", 0) + tok.get("output", 0) + tok.get("cache_read", 0) + tok.get("cache_create", 0)
+        model_raw = s.get("last_prompt_model", "") or ""
+        model_key = "opus"
+        if "haiku" in model_raw:
+            model_key = "haiku"
+        elif "sonnet" in model_raw:
+            model_key = "sonnet"
+        pricing = MODEL_PRICING[model_key]
         cost = (
-            tok.get("input", 0) / 1_000_000 * 5.0
-            + tok.get("output", 0) / 1_000_000 * 25.0
-            + tok.get("cache_read", 0) / 1_000_000 * 0.5
-            + tok.get("cache_create", 0) / 1_000_000 * 6.25
+            tok.get("input", 0) / 1_000_000 * pricing["input"]
+            + tok.get("output", 0) / 1_000_000 * pricing["output"]
+            + tok.get("cache_read", 0) / 1_000_000 * pricing["cache_read"]
+            + tok.get("cache_create", 0) / 1_000_000 * pricing["cache_create"]
         )
 
         cache_read = tok.get("cache_read", 0)
