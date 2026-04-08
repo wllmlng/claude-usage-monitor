@@ -58,10 +58,11 @@ def build_burn_panel(today_sessions):
     # Right column: vertical hourly bar chart
     right = Text()
     right.append("Hourly Usage:\n", style="bold white")
-    max_val = max(visible_hours) if visible_hours and max(visible_hours) > 0 else 1
+    actual_max = max(visible_hours) if visible_hours and max(visible_hours) > 0 else 1
+    cap_val = 5_000_000  # ~714K tokens per row; yellow=0-2.1M, orange=2.1-3.6M, red=3.6M+
     chart_height = 7
     for row in range(chart_height, 0, -1):
-        threshold = max_val * row / chart_height
+        threshold = cap_val * row / chart_height
         if row > 5:
             bar_style = "bold red"
         elif row > 3:
@@ -70,7 +71,8 @@ def build_burn_panel(today_sessions):
             bar_style = "bright_yellow"
         right.append(" ", style="dim")
         for val in visible_hours:
-            if val >= threshold and val > 0:
+            floor_block = row == 1 and val > 0
+            if floor_block or (min(val, cap_val) >= threshold and val > 0):
                 right.append("██", style=bar_style)
             else:
                 right.append("  ", style="dim")
@@ -84,7 +86,7 @@ def build_burn_panel(today_sessions):
         label = f"{display_h}{suffix}"
         right.append(f"{label:<4}", style="dim")
     right.append("\n Peak: ", style="dim")
-    right.append(f"{format_tokens(max_val)}", style="bold white")
+    right.append(f"{format_tokens(actual_max)}", style="bold white")
 
     grid = Table.grid(padding=(0, 1))
     grid.add_column(width=30)
