@@ -19,10 +19,9 @@ def build_projects_panel(today_sessions, all_sessions):
     all_by_project = {}
     for s in all_sessions:
         name = s.get("project_name", "unknown")
-        if name in today_by_project:
-            if name not in all_by_project:
-                all_by_project[name] = []
-            all_by_project[name].append(s)
+        if name not in all_by_project:
+            all_by_project[name] = []
+        all_by_project[name].append(s)
 
     table = Table(expand=True)
     table.add_column("Project", style="cyan")
@@ -55,7 +54,7 @@ def build_projects_panel(today_sessions, all_sessions):
         all_cost = estimate_cost(all_s)
 
         project_models = set()
-        for s in today_s:
+        for s in all_s:
             project_models.update(s.get("models", []))
         short_models = []
         for m in sorted(project_models):

@@ -1,6 +1,6 @@
 from rich.text import Text
 
-from constants import MODEL_PRICING
+from constants import get_model_pricing
 
 
 def horizontal_bar(parts, width=40):
@@ -22,19 +22,20 @@ def estimate_cost(sessions):
     """Estimate what the usage would cost on API pricing."""
     total_cost = 0.0
     for s in sessions:
-        models = s.get("models", [])
-        model_str = " ".join(models).lower()
-        if "opus" in model_str:
-            pricing = MODEL_PRICING["opus"]
-        elif "haiku" in model_str:
-            pricing = MODEL_PRICING["haiku"]
+        tokens_by_model = s.get("tokens_by_model", {})
+        if tokens_by_model:
+            for model, tok in tokens_by_model.items():
+                pricing = get_model_pricing(model)
+                total_cost += tok["input"] / 1_000_000 * pricing["input"]
+                total_cost += tok["output"] / 1_000_000 * pricing["output"]
+                total_cost += tok["cache_read"] / 1_000_000 * pricing["cache_read"]
+                total_cost += tok["cache_create"] / 1_000_000 * pricing["cache_create"]
         else:
-            pricing = MODEL_PRICING["sonnet"]
-
-        total_cost += s.get("input_tokens", 0) / 1_000_000 * pricing["input"]
-        total_cost += s.get("output_tokens", 0) / 1_000_000 * pricing["output"]
-        total_cost += s.get("cache_read_tokens", 0) / 1_000_000 * pricing["cache_read"]
-        total_cost += s.get("cache_create_tokens", 0) / 1_000_000 * pricing["cache_create"]
+            pricing = get_model_pricing(s.get("last_prompt_model", "") or "")
+            total_cost += s.get("input_tokens", 0) / 1_000_000 * pricing["input"]
+            total_cost += s.get("output_tokens", 0) / 1_000_000 * pricing["output"]
+            total_cost += s.get("cache_read_tokens", 0) / 1_000_000 * pricing["cache_read"]
+            total_cost += s.get("cache_create_tokens", 0) / 1_000_000 * pricing["cache_create"]
     return total_cost
 
 

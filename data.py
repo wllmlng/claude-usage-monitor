@@ -1,14 +1,14 @@
 """Session parsing, caching, filtering, and aggregation."""
 
 import json
-from datetime import date as date_type, datetime, timezone, timedelta
+from datetime import date as date_type, datetime
 from pathlib import Path
 
-from constants import PROJECTS_DIR, LOCAL_TZ, MODEL_PRICING
+from constants import PROJECTS_DIR, LOCAL_TZ, get_model_pricing
 
 
 # Bump this when the parsed session schema changes to invalidate stale caches
-_CACHE_VERSION = 4
+_CACHE_VERSION = 6
 
 # Cache: path -> (mtime, file_size, parsed_session)
 _session_cache: dict[str, tuple[float, int, dict]] = {}
@@ -69,6 +69,8 @@ def parse_jsonl_session(path, project_dir_name):
     session_id = path.stem
     hourly_tokens = {}
     daily_tokens = {}
+    daily_tokens_by_model = {}
+    tokens_by_model = {}
     daily_messages = {}
     last_user_prompt = None
     last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
@@ -124,7 +126,7 @@ def parse_jsonl_session(path, project_dir_name):
                 if role == "assistant":
                     assistant_messages += 1
                     model = msg.get("model", "")
-                    if model:
+                    if model and model != "<synthetic>":
                         models_used.add(model)
 
                     msg_input = usage.get("input_tokens", 0)
@@ -136,6 +138,15 @@ def parse_jsonl_session(path, project_dir_name):
                     output_tokens += msg_output
                     cache_read += msg_cache_r
                     cache_create += msg_cache_c
+
+                    real_model = model if model and model != "<synthetic>" else None
+                    model_key = real_model or last_prompt_model or "unknown"
+                    if model_key not in tokens_by_model:
+                        tokens_by_model[model_key] = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+                    tokens_by_model[model_key]["input"] += msg_input
+                    tokens_by_model[model_key]["output"] += msg_output
+                    tokens_by_model[model_key]["cache_read"] += msg_cache_r
+                    tokens_by_model[model_key]["cache_create"] += msg_cache_c
 
                     if tracking_last_prompt:
                         last_prompt_response_tokens["input"] += msg_input
@@ -158,6 +169,15 @@ def parse_jsonl_session(path, project_dir_name):
                         daily_tokens[day_key]["output"] += msg_output
                         daily_tokens[day_key]["cache_read"] += msg_cache_r
                         daily_tokens[day_key]["cache_create"] += msg_cache_c
+
+                        if day_key not in daily_tokens_by_model:
+                            daily_tokens_by_model[day_key] = {}
+                        if model_key not in daily_tokens_by_model[day_key]:
+                            daily_tokens_by_model[day_key][model_key] = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
+                        daily_tokens_by_model[day_key][model_key]["input"] += msg_input
+                        daily_tokens_by_model[day_key][model_key]["output"] += msg_output
+                        daily_tokens_by_model[day_key][model_key]["cache_read"] += msg_cache_r
+                        daily_tokens_by_model[day_key][model_key]["cache_create"] += msg_cache_c
 
                     for block in msg.get("content", []):
                         if isinstance(block, dict) and block.get("type") == "tool_use":
@@ -195,11 +215,13 @@ def parse_jsonl_session(path, project_dir_name):
         "assistant_message_count": assistant_messages,
         "tool_calls": tool_calls,
         "models": list(models_used),
+        "tokens_by_model": tokens_by_model,
         "hourly_tokens": hourly_tokens,
         "last_prompt": last_user_prompt,
         "last_prompt_model": last_prompt_model,
         "last_prompt_tokens": last_prompt_response_tokens,
         "daily_tokens": daily_tokens,
+        "daily_tokens_by_model": daily_tokens_by_model,
         "daily_messages": daily_messages,
         "_cache_version": _CACHE_VERSION,
     }
@@ -258,29 +280,29 @@ def aggregate_tokens_for_dates(sessions, start_date, end_date):
 
 
 def estimate_cost_for_dates(sessions, start_date, end_date):
-    """Estimate cost for tokens within a date range, using each session's model pricing.
-
-    Note: pricing is determined per-session, not per-message. If a session uses
-    multiple models, the most expensive one (opus) is used as an upper-bound estimate.
-    """
+    """Estimate cost for tokens within a date range, priced per model per day."""
     total_cost = 0.0
     for s in sessions:
-        models = s.get("models", [])
-        model_str = " ".join(models).lower()
-        if "opus" in model_str:
-            pricing = MODEL_PRICING["opus"]
-        elif "haiku" in model_str:
-            pricing = MODEL_PRICING["haiku"]
+        daily_by_model = s.get("daily_tokens_by_model", {})
+        if daily_by_model:
+            for day_str, models_dict in daily_by_model.items():
+                d = date_type.fromisoformat(day_str)
+                if start_date <= d <= end_date:
+                    for model, tok in models_dict.items():
+                        pricing = get_model_pricing(model)
+                        total_cost += tok["input"] / 1_000_000 * pricing["input"]
+                        total_cost += tok["output"] / 1_000_000 * pricing["output"]
+                        total_cost += tok["cache_read"] / 1_000_000 * pricing["cache_read"]
+                        total_cost += tok["cache_create"] / 1_000_000 * pricing["cache_create"]
         else:
-            pricing = MODEL_PRICING["sonnet"]
-
-        for day_str, tok in s.get("daily_tokens", {}).items():
-            d = date_type.fromisoformat(day_str)
-            if start_date <= d <= end_date:
-                total_cost += tok["input"] / 1_000_000 * pricing["input"]
-                total_cost += tok["output"] / 1_000_000 * pricing["output"]
-                total_cost += tok["cache_read"] / 1_000_000 * pricing["cache_read"]
-                total_cost += tok["cache_create"] / 1_000_000 * pricing["cache_create"]
+            pricing = get_model_pricing(s.get("last_prompt_model", "") or "")
+            for day_str, tok in s.get("daily_tokens", {}).items():
+                d = date_type.fromisoformat(day_str)
+                if start_date <= d <= end_date:
+                    total_cost += tok["input"] / 1_000_000 * pricing["input"]
+                    total_cost += tok["output"] / 1_000_000 * pricing["output"]
+                    total_cost += tok["cache_read"] / 1_000_000 * pricing["cache_read"]
+                    total_cost += tok["cache_create"] / 1_000_000 * pricing["cache_create"]
     return total_cost
 
 

@@ -4,7 +4,7 @@ from datetime import date as date_type, datetime
 from rich.panel import Panel
 from rich.text import Text
 
-from constants import LOCAL_TZ, MODEL_PRICING
+from constants import LOCAL_TZ, get_model_pricing
 
 
 def build_calendar_panel(all_sessions):
@@ -15,25 +15,31 @@ def build_calendar_panel(all_sessions):
     # Aggregate per-day token costs from actual timestamps
     daily_cost = {}
     for s in all_sessions:
-        models = s.get("models", [])
-        model_str = " ".join(models).lower()
-        if "opus" in model_str:
-            pricing = MODEL_PRICING["opus"]
-        elif "haiku" in model_str:
-            pricing = MODEL_PRICING["haiku"]
+        daily_by_model = s.get("daily_tokens_by_model", {})
+        if daily_by_model:
+            for day_str, models_dict in daily_by_model.items():
+                d = date_type.fromisoformat(day_str)
+                if d.year == year and d.month == month:
+                    cost = sum(
+                        tok["input"] / 1_000_000 * get_model_pricing(model)["input"]
+                        + tok["output"] / 1_000_000 * get_model_pricing(model)["output"]
+                        + tok["cache_read"] / 1_000_000 * get_model_pricing(model)["cache_read"]
+                        + tok["cache_create"] / 1_000_000 * get_model_pricing(model)["cache_create"]
+                        for model, tok in models_dict.items()
+                    )
+                    daily_cost[d] = daily_cost.get(d, 0) + cost
         else:
-            pricing = MODEL_PRICING["sonnet"]
-
-        for day_str, tok in s.get("daily_tokens", {}).items():
-            d = date_type.fromisoformat(day_str)
-            if d.year == year and d.month == month:
-                cost = (
-                    tok["input"] / 1_000_000 * pricing["input"]
-                    + tok["output"] / 1_000_000 * pricing["output"]
-                    + tok["cache_read"] / 1_000_000 * pricing["cache_read"]
-                    + tok["cache_create"] / 1_000_000 * pricing["cache_create"]
-                )
-                daily_cost[d] = daily_cost.get(d, 0) + cost
+            pricing = get_model_pricing(s.get("last_prompt_model", "") or "")
+            for day_str, tok in s.get("daily_tokens", {}).items():
+                d = date_type.fromisoformat(day_str)
+                if d.year == year and d.month == month:
+                    cost = (
+                        tok["input"] / 1_000_000 * pricing["input"]
+                        + tok["output"] / 1_000_000 * pricing["output"]
+                        + tok["cache_read"] / 1_000_000 * pricing["cache_read"]
+                        + tok["cache_create"] / 1_000_000 * pricing["cache_create"]
+                    )
+                    daily_cost[d] = daily_cost.get(d, 0) + cost
 
     max_cost = max(daily_cost.values()) if daily_cost else 1.0
 

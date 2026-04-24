@@ -6,7 +6,7 @@ from rich.text import Text
 
 from constants import LOCAL_TZ
 from data import calc_burn_rate, aggregate_hourly, estimate_cost_for_dates
-from utils import estimate_cost, format_tokens, format_cost
+from utils import format_tokens, format_cost
 
 
 def build_burn_panel(today_sessions):
@@ -23,7 +23,7 @@ def build_burn_panel(today_sessions):
     ten_min_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
     active = [
         s for s in today_sessions
-        if datetime.fromisoformat(s["last_activity"]) >= ten_min_ago
+        if datetime.fromisoformat(s["last_activity"]).astimezone(timezone.utc) >= ten_min_ago
     ]
 
     # Hourly usage chart — trim empty leading/trailing hours

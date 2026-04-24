@@ -27,10 +27,6 @@ def build_token_panel(all_sessions):
     m_in, m_out, m_cr, m_cc = aggregate_tokens_for_dates(all_sessions, month_start, today)
     month_total = m_in + m_out + m_cr + m_cc
 
-    today_key = today.isoformat()
-    today_msgs = sum(s.get("daily_messages", {}).get(today_key, 0) for s in all_sessions)
-    avg_cost = today_cost / today_msgs if today_msgs > 0 else 0
-
     # Token type breakdown bar — based on most recently active session
     active_session = max(
         (s for s in all_sessions if s.get("daily_tokens", {}).get(today.isoformat())),
@@ -62,9 +58,7 @@ def build_token_panel(all_sessions):
     left.append(f"{format_cost(week_cost)}\n", style="bold yellow")
     left.append("Month ", style="bold white")
     left.append(f"{format_tokens(month_total)} ", style="bold white")
-    left.append(f"{format_cost(month_cost)}\n\n", style="bold yellow")
-    left.append("Avg Cost/Prompt (today) ", style="dim")
-    left.append(f"{format_cost(avg_cost)}\n", style="bold yellow")
+    left.append(f"{format_cost(month_cost)}\n", style="bold yellow")
 
     # Right column: breakdown bar
     right = Text()
