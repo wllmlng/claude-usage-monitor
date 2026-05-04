@@ -1,12 +1,12 @@
 from rich.panel import Panel
 from rich.table import Table
 
-from constants import MODEL_PRICING
-from utils import format_tokens, format_cost
+from utils import cost_for_tokens, format_tokens, format_cost, pricing_for_models
 
 
-def build_last_prompt_panel(today_sessions):
+def build_last_prompt_panel(today_sessions, view_date=None, is_current=True):
     """Show the last prompt per active project with token usage."""
+    day_label = "Today" if is_current else (view_date.strftime("%b %-d") if view_date else "Today")
     by_project = {}
     for s in today_sessions:
         name = s.get("project_name", "unknown")
@@ -30,19 +30,7 @@ def build_last_prompt_panel(today_sessions):
 
         tok = s.get("last_prompt_tokens", {})
         total = tok.get("input", 0) + tok.get("output", 0) + tok.get("cache_read", 0) + tok.get("cache_create", 0)
-        model_raw = s.get("last_prompt_model", "") or ""
-        model_key = "opus"
-        if "haiku" in model_raw:
-            model_key = "haiku"
-        elif "sonnet" in model_raw:
-            model_key = "sonnet"
-        pricing = MODEL_PRICING[model_key]
-        cost = (
-            tok.get("input", 0) / 1_000_000 * pricing["input"]
-            + tok.get("output", 0) / 1_000_000 * pricing["output"]
-            + tok.get("cache_read", 0) / 1_000_000 * pricing["cache_read"]
-            + tok.get("cache_create", 0) / 1_000_000 * pricing["cache_create"]
-        )
+        cost = cost_for_tokens(tok, pricing_for_models([s.get("last_prompt_model", "") or ""]))
 
         cache_read = tok.get("cache_read", 0)
         model = s.get("last_prompt_model", "—") or "—"
@@ -56,6 +44,7 @@ def build_last_prompt_panel(today_sessions):
         table.add_row(name, prompt, format_tokens(cache_read), model, format_tokens(total), format_cost(cost))
 
     if not by_project:
-        table.add_row("[dim]No sessions today[/]", "", "", "", "")
+        table.add_row(f"[dim]No sessions on {day_label}[/]", "", "", "", "")
 
-    return Panel(table, title="Last Prompt per Project", border_style="bright_white")
+    title = "Last Prompt per Project" if is_current else f"Last Prompt per Project ({day_label})"
+    return Panel(table, title=title, border_style="bright_white")

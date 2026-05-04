@@ -1,3 +1,4 @@
+import calendar
 from datetime import datetime, timedelta
 
 from rich.panel import Panel
@@ -9,8 +10,8 @@ from data import aggregate_tokens_for_dates, estimate_cost_for_dates
 from utils import horizontal_bar, format_tokens, format_cost
 
 
-def build_token_panel(all_sessions):
-    today = datetime.now(LOCAL_TZ).date()
+def build_token_panel(all_sessions, view_date=None, is_current=True):
+    today = view_date or datetime.now(LOCAL_TZ).date()
     monday = (today - timedelta(days=today.weekday()))
     sunday = monday + timedelta(days=6)
 
@@ -23,15 +24,16 @@ def build_token_panel(all_sessions):
     today_cost = estimate_cost_for_dates(all_sessions, today, today)
     week_cost = estimate_cost_for_dates(all_sessions, monday, sunday)
     month_start = today.replace(day=1)
-    month_cost = estimate_cost_for_dates(all_sessions, month_start, today)
-    m_in, m_out, m_cr, m_cc = aggregate_tokens_for_dates(all_sessions, month_start, today)
+    month_end = today if is_current else today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    month_cost = estimate_cost_for_dates(all_sessions, month_start, month_end)
+    m_in, m_out, m_cr, m_cc = aggregate_tokens_for_dates(all_sessions, month_start, month_end)
     month_total = m_in + m_out + m_cr + m_cc
 
     today_key = today.isoformat()
     today_msgs = sum(s.get("daily_messages", {}).get(today_key, 0) for s in all_sessions)
     avg_cost = today_cost / today_msgs if today_msgs > 0 else 0
 
-    # Token type breakdown bar — based on most recently active session
+    # Token type breakdown bar — based on most recently active session on view date
     active_session = max(
         (s for s in all_sessions if s.get("daily_tokens", {}).get(today.isoformat())),
         key=lambda s: s["last_activity"],
@@ -53,8 +55,9 @@ def build_token_panel(all_sessions):
     ], width=36)
 
     # Left column: totals
+    day_label = "Today" if is_current else today.strftime("%b %-d")
     left = Text()
-    left.append("Today ", style="bold white")
+    left.append(f"{day_label:<7}", style="bold white")
     left.append(f"{format_tokens(today_total)} ", style="bold white")
     left.append(f"{format_cost(today_cost)}\n", style="bold yellow")
     left.append("Week  ", style="bold white")
@@ -63,7 +66,7 @@ def build_token_panel(all_sessions):
     left.append("Month ", style="bold white")
     left.append(f"{format_tokens(month_total)} ", style="bold white")
     left.append(f"{format_cost(month_cost)}\n\n", style="bold yellow")
-    left.append("Avg Cost/Prompt (today) ", style="dim")
+    left.append(f"Avg Cost/Prompt ({day_label.lower()}) ", style="dim")
     left.append(f"{format_cost(avg_cost)}\n", style="bold yellow")
 
     # Right column: breakdown bar

@@ -1,10 +1,24 @@
 """Session parsing, caching, filtering, and aggregation."""
 
+import calendar
 import json
 from datetime import date as date_type, datetime, timezone, timedelta
 from pathlib import Path
 
-from constants import PROJECTS_DIR, LOCAL_TZ, MODEL_PRICING
+from constants import PROJECTS_DIR, LOCAL_TZ
+from utils import pricing_for_models, cost_for_tokens
+
+
+def parse_ts(s):
+    """Parse an ISO timestamp, accepting trailing 'Z' on older Python versions."""
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def add_months(year, month, offset):
+    """Return (year, month) shifted by `offset` months."""
+    total = year * 12 + (month - 1) + offset
+    y, m = divmod(total, 12)
+    return y, m + 1
 
 
 # Bump this when the parsed session schema changes to invalidate stale caches
@@ -88,7 +102,7 @@ def parse_jsonl_session(path, project_dir_name):
 
                 ts_str = entry.get("timestamp")
                 if ts_str:
-                    ts = datetime.fromisoformat(ts_str)
+                    ts = parse_ts(ts_str)
                     if first_ts is None or ts < first_ts:
                         first_ts = ts
                     if last_ts is None or ts > last_ts:
@@ -118,7 +132,7 @@ def parse_jsonl_session(path, project_dir_name):
                         last_prompt_response_tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
                         tracking_last_prompt = True
                         if ts_str:
-                            msg_day = datetime.fromisoformat(ts_str).astimezone(LOCAL_TZ).date().isoformat()
+                            msg_day = parse_ts(ts_str).astimezone(LOCAL_TZ).date().isoformat()
                             daily_messages[msg_day] = daily_messages.get(msg_day, 0) + 1
 
                 if role == "assistant":
@@ -146,7 +160,7 @@ def parse_jsonl_session(path, project_dir_name):
                             last_prompt_model = model
 
                     if ts_str:
-                        local_dt = datetime.fromisoformat(ts_str).astimezone(LOCAL_TZ)
+                        local_dt = parse_ts(ts_str).astimezone(LOCAL_TZ)
                         hour_key = f"{local_dt.date().isoformat()}:{local_dt.hour}"
                         msg_total = msg_input + msg_output + msg_cache_r + msg_cache_c
                         hourly_tokens[hour_key] = hourly_tokens.get(hour_key, 0) + msg_total
@@ -205,14 +219,43 @@ def parse_jsonl_session(path, project_dir_name):
     }
 
 
-def filter_today(sessions):
-    """Filter sessions that have activity today (Pacific time)."""
-    today = datetime.now(LOCAL_TZ).date()
+def filter_for_date(sessions, target_date):
+    """Filter sessions that have activity on a given local date."""
     return [
         s for s in sessions
-        if datetime.fromisoformat(s["last_activity"]).astimezone(LOCAL_TZ).date() == today
-        or datetime.fromisoformat(s["start_time"]).astimezone(LOCAL_TZ).date() == today
+        if target_date.isoformat() in s.get("daily_tokens", {})
+        or target_date.isoformat() in s.get("daily_messages", {})
+        or datetime.fromisoformat(s["last_activity"]).astimezone(LOCAL_TZ).date() == target_date
+        or datetime.fromisoformat(s["start_time"]).astimezone(LOCAL_TZ).date() == target_date
     ]
+
+
+def resolve_view_date(sessions, year, month):
+    """Pick a representative day for the given month.
+
+    Returns the most recent day with activity in that month, or the last day
+    of the month if there is none. For the current month, returns today.
+    """
+    today = datetime.now(LOCAL_TZ).date()
+    if year == today.year and month == today.month:
+        return today
+    days_in_month = calendar.monthrange(year, month)[1]
+    last_day = date_type(year, month, days_in_month)
+    best = None
+    for s in sessions:
+        for day_str, tok in s.get("daily_tokens", {}).items():
+            try:
+                d = date_type.fromisoformat(day_str)
+            except ValueError:
+                continue
+            if d.year != year or d.month != month:
+                continue
+            total = tok.get("input", 0) + tok.get("output", 0) + tok.get("cache_read", 0) + tok.get("cache_create", 0)
+            if total <= 0:
+                continue
+            if best is None or d > best:
+                best = d
+    return best or last_day
 
 
 def aggregate_tokens(sessions):
@@ -246,6 +289,16 @@ def aggregate_hourly(sessions, target_date=None):
 def aggregate_tokens_for_dates(sessions, start_date, end_date):
     """Sum only tokens that occurred within the date range using daily_tokens."""
     total_in, total_out, total_cr, total_cc = 0, 0, 0, 0
+    if start_date == end_date:
+        key = start_date.isoformat()
+        for s in sessions:
+            tok = s.get("daily_tokens", {}).get(key)
+            if tok:
+                total_in += tok["input"]
+                total_out += tok["output"]
+                total_cr += tok["cache_read"]
+                total_cc += tok["cache_create"]
+        return total_in, total_out, total_cr, total_cc
     for s in sessions:
         for day_str, tok in s.get("daily_tokens", {}).items():
             d = date_type.fromisoformat(day_str)
@@ -260,37 +313,21 @@ def aggregate_tokens_for_dates(sessions, start_date, end_date):
 def estimate_cost_for_dates(sessions, start_date, end_date):
     """Estimate cost for tokens within a date range, using each session's model pricing.
 
-    Note: pricing is determined per-session, not per-message. If a session uses
-    multiple models, the most expensive one (opus) is used as an upper-bound estimate.
+    Pricing is determined per-session: if a session uses multiple models, the most
+    expensive one (opus) is used as an upper-bound estimate.
     """
     total_cost = 0.0
+    if start_date == end_date:
+        key = start_date.isoformat()
+        for s in sessions:
+            tok = s.get("daily_tokens", {}).get(key)
+            if tok:
+                total_cost += cost_for_tokens(tok, pricing_for_models(s.get("models", [])))
+        return total_cost
     for s in sessions:
-        models = s.get("models", [])
-        model_str = " ".join(models).lower()
-        if "opus" in model_str:
-            pricing = MODEL_PRICING["opus"]
-        elif "haiku" in model_str:
-            pricing = MODEL_PRICING["haiku"]
-        else:
-            pricing = MODEL_PRICING["sonnet"]
-
+        pricing = pricing_for_models(s.get("models", []))
         for day_str, tok in s.get("daily_tokens", {}).items():
             d = date_type.fromisoformat(day_str)
             if start_date <= d <= end_date:
-                total_cost += tok["input"] / 1_000_000 * pricing["input"]
-                total_cost += tok["output"] / 1_000_000 * pricing["output"]
-                total_cost += tok["cache_read"] / 1_000_000 * pricing["cache_read"]
-                total_cost += tok["cache_create"] / 1_000_000 * pricing["cache_create"]
+                total_cost += cost_for_tokens(tok, pricing)
     return total_cost
-
-
-def calc_burn_rate(sessions):
-    """Today's tokens per hour based on hours elapsed today."""
-    today = datetime.now(LOCAL_TZ).date()
-    inp, out, cache_r, cache_c = aggregate_tokens_for_dates(sessions, today, today)
-    total = inp + out + cache_r + cache_c
-    if total == 0:
-        return 0.0
-    now = datetime.now(LOCAL_TZ)
-    hours_today = max((now - datetime.combine(today, datetime.min.time(), tzinfo=LOCAL_TZ)).total_seconds() / 3600, 0.1)
-    return total / hours_today

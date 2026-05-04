@@ -4,55 +4,46 @@ from datetime import date as date_type, datetime
 from rich.panel import Panel
 from rich.text import Text
 
-from constants import LOCAL_TZ, MODEL_PRICING
+from constants import LOCAL_TZ
+from data import add_months
+from utils import cost_for_tokens, pricing_for_models
 
 
-def build_calendar_panel(all_sessions):
-    """Show a monthly calendar heatmap of daily usage."""
+def build_calendar_panel(all_sessions, month_offset=0):
+    """Show a monthly calendar heatmap of daily usage.
+
+    month_offset: 0 = current month, -1 = previous, etc.
+    """
     now = datetime.now(LOCAL_TZ)
-    year, month = now.year, now.month
+    year, month = add_months(now.year, now.month, month_offset)
+    is_current_month = (month_offset == 0)
 
-    # Aggregate per-day token costs from actual timestamps
     daily_cost = {}
     for s in all_sessions:
-        models = s.get("models", [])
-        model_str = " ".join(models).lower()
-        if "opus" in model_str:
-            pricing = MODEL_PRICING["opus"]
-        elif "haiku" in model_str:
-            pricing = MODEL_PRICING["haiku"]
-        else:
-            pricing = MODEL_PRICING["sonnet"]
-
+        pricing = pricing_for_models(s.get("models", []))
         for day_str, tok in s.get("daily_tokens", {}).items():
             d = date_type.fromisoformat(day_str)
             if d.year == year and d.month == month:
-                cost = (
-                    tok["input"] / 1_000_000 * pricing["input"]
-                    + tok["output"] / 1_000_000 * pricing["output"]
-                    + tok["cache_read"] / 1_000_000 * pricing["cache_read"]
-                    + tok["cache_create"] / 1_000_000 * pricing["cache_create"]
-                )
-                daily_cost[d] = daily_cost.get(d, 0) + cost
-
-    max_cost = max(daily_cost.values()) if daily_cost else 1.0
+                daily_cost[d] = daily_cost.get(d, 0) + cost_for_tokens(tok, pricing)
 
     cal = cal_mod.monthcalendar(year, month)
     month_name = cal_mod.month_name[month]
 
-    # Compute avg/projected early for header
-    import calendar as cal_stdlib
     total_month_cost = sum(daily_cost.values())
-    days_elapsed = now.day
-    days_in_month = cal_stdlib.monthrange(year, month)[1]
+    days_in_month = cal_mod.monthrange(year, month)[1]
+    days_elapsed = now.day if is_current_month else days_in_month
     avg_daily = total_month_cost / days_elapsed if days_elapsed > 0 else 0
     projected = avg_daily * days_in_month
 
     lines = Text()
     lines.append(f"  {month_name} {year}", style="bold white")
     lines.append(f" — ", style="dim")
-    lines.append(f"${avg_daily:.2f}/day", style="bold yellow")
-    lines.append(f"  ~${projected:.0f}/mo\n", style="dim yellow")
+    if is_current_month:
+        lines.append(f"${avg_daily:.2f}/day", style="bold yellow")
+        lines.append(f"  ~${projected:.0f}/mo\n", style="dim yellow")
+    else:
+        lines.append(f"${total_month_cost:.0f} total", style="bold yellow")
+        lines.append(f"  ${avg_daily:.2f}/day\n", style="dim yellow")
     lines.append("  Mon   Tue   Wed   Thu   Fri   Sat   Sun\n", style="dim")
 
     for week in cal:
@@ -108,6 +99,10 @@ def build_calendar_panel(all_sessions):
     lines.append("██", style="rgb(255,165,0)")
     lines.append("<$30 ", style="dim")
     lines.append("██", style="bold red")
-    lines.append("$30+", style="dim")
+    lines.append("$30+\n", style="dim")
+    lines.append("  ◀ ▶ browse months", style="dim")
 
-    return Panel(lines, title="Monthly Usage", border_style="bright_cyan")
+    title = "Monthly Usage"
+    if month_offset != 0:
+        title = f"Monthly Usage  ({month_offset:+d}mo)"
+    return Panel(lines, title=title, border_style="bright_cyan")

@@ -18,23 +18,38 @@ def horizontal_bar(parts, width=40):
     return bar
 
 
+def pricing_for_models(models):
+    """Pick the most-expensive pricing tier among a session's models (upper-bound estimate)."""
+    model_str = " ".join(models).lower() if models else ""
+    if "opus" in model_str:
+        return MODEL_PRICING["opus"]
+    if "haiku" in model_str:
+        return MODEL_PRICING["haiku"]
+    return MODEL_PRICING["sonnet"]
+
+
+def cost_for_tokens(tok, pricing):
+    """Cost for a {input, output, cache_read, cache_create} dict at given pricing."""
+    return (
+        tok.get("input", 0) / 1_000_000 * pricing["input"]
+        + tok.get("output", 0) / 1_000_000 * pricing["output"]
+        + tok.get("cache_read", 0) / 1_000_000 * pricing["cache_read"]
+        + tok.get("cache_create", 0) / 1_000_000 * pricing["cache_create"]
+    )
+
+
 def estimate_cost(sessions):
     """Estimate what the usage would cost on API pricing."""
     total_cost = 0.0
     for s in sessions:
-        models = s.get("models", [])
-        model_str = " ".join(models).lower()
-        if "opus" in model_str:
-            pricing = MODEL_PRICING["opus"]
-        elif "haiku" in model_str:
-            pricing = MODEL_PRICING["haiku"]
-        else:
-            pricing = MODEL_PRICING["sonnet"]
-
-        total_cost += s.get("input_tokens", 0) / 1_000_000 * pricing["input"]
-        total_cost += s.get("output_tokens", 0) / 1_000_000 * pricing["output"]
-        total_cost += s.get("cache_read_tokens", 0) / 1_000_000 * pricing["cache_read"]
-        total_cost += s.get("cache_create_tokens", 0) / 1_000_000 * pricing["cache_create"]
+        pricing = pricing_for_models(s.get("models", []))
+        tok = {
+            "input": s.get("input_tokens", 0),
+            "output": s.get("output_tokens", 0),
+            "cache_read": s.get("cache_read_tokens", 0),
+            "cache_create": s.get("cache_create_tokens", 0),
+        }
+        total_cost += cost_for_tokens(tok, pricing)
     return total_cost
 
 

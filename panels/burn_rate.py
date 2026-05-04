@@ -5,30 +5,34 @@ from rich.table import Table
 from rich.text import Text
 
 from constants import LOCAL_TZ
-from data import calc_burn_rate, aggregate_hourly, estimate_cost_for_dates
+from data import aggregate_hourly, aggregate_tokens_for_dates, estimate_cost_for_dates
 from utils import estimate_cost, format_tokens, format_cost
 
 
-def build_burn_panel(today_sessions):
-    rate = calc_burn_rate(today_sessions)
-    today = datetime.now(LOCAL_TZ).date()
+def build_burn_panel(today_sessions, view_date=None, is_current=True):
+    today = view_date or datetime.now(LOCAL_TZ).date()
+    inp, out, cr, cc = aggregate_tokens_for_dates(today_sessions, today, today)
+    total_tok = inp + out + cr + cc
+    if is_current:
+        now = datetime.now(LOCAL_TZ)
+        hours_today = max((now - datetime.combine(today, datetime.min.time(), tzinfo=LOCAL_TZ)).total_seconds() / 3600, 0.1)
+    else:
+        hours_today = 24.0
+    rate = total_tok / hours_today if hours_today > 0 else 0
     today_cost = estimate_cost_for_dates(today_sessions, today, today)
-    now = datetime.now(LOCAL_TZ)
-    hours_today = max((now - datetime.combine(today, datetime.min.time(), tzinfo=LOCAL_TZ)).total_seconds() / 3600, 0.1)
     cost_per_hr = today_cost / hours_today
 
-    total_msgs = sum(s.get("user_message_count", 0) for s in today_sessions)
+    total_msgs = sum(s.get("daily_messages", {}).get(today.isoformat(), 0) for s in today_sessions)
     total_tools = sum(s.get("tool_calls", 0) for s in today_sessions)
 
-    ten_min_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
-    active = [
-        s for s in today_sessions
-        if datetime.fromisoformat(s["last_activity"]) >= ten_min_ago
-    ]
+    active = []
+    if is_current:
+        ten_min_ago = datetime.now(timezone.utc) - timedelta(minutes=10)
+        active = [s for s in today_sessions if datetime.fromisoformat(s["last_activity"]) >= ten_min_ago]
 
     # Hourly usage chart — trim empty leading/trailing hours
-    hourly = aggregate_hourly(today_sessions)
-    current_hour = datetime.now(LOCAL_TZ).hour
+    hourly = aggregate_hourly(today_sessions, today)
+    current_hour = datetime.now(LOCAL_TZ).hour if is_current else 23
     start_hour = 6
     end_hour = current_hour + 1
     visible_hours = hourly[start_hour:end_hour] if end_hour > start_hour else hourly[start_hour:]
@@ -47,11 +51,14 @@ def build_burn_panel(today_sessions):
     left.append(f"{format_tokens(int(rate))}/hr\n", style="bold white")
     left.append(f"                ", style="bold white")
     left.append(f"{format_cost(cost_per_hr)}/hr\n\n", style="bold yellow")
-    left.append(f"Sessions Today: {len(today_sessions)}\n", style="bold white")
-    if active:
+    sessions_label = "Sessions Today: " if is_current else f"Sessions {today.strftime('%b %-d')}:".ljust(16)
+    left.append(f"{sessions_label}{len(today_sessions)}\n", style="bold white")
+    if not is_current:
+        left.append("Active Now:     —\n", style="dim")
+    elif active:
         left.append(f"Active Now:     {len(active)}\n", style="bold green")
     else:
-        left.append(f"Active Now:     0\n", style="dim")
+        left.append("Active Now:     0\n", style="dim")
     left.append(f"Messages:       {total_msgs}\n", style="bold white")
     left.append(f"Tool Calls:     {total_tools}\n", style="bold white")
 
